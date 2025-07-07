@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <title>Gestão de Turmas - Upload JSON</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+<div class="container py-4">
+    <h2 class="mb-4">Gestão de Turmas via JSON</h2>
+    <div class="mb-3">
+        <label for="jsonFile" class="form-label">Carregar arquivo JSON de turmas:</label>
+        <input class="form-control" type="file" id="jsonFile" accept=".json" onchange="loadFile(event)">
+    </div>
+
+    <button class="btn btn-primary mb-3" id="btnNova" onclick="showTurmaForm()" style="display:none;">Nova Turma</button>
+    <div id="turmasList"></div>
+    <a href="#" class="btn btn-success mt-3" id="btnExport" onclick="exportarJSON()" style="display:none;">Baixar JSON Atualizado</a>
+
+    <!-- Modal de Cadastro/Edição -->
+    <div class="modal fade" id="turmaModal" tabindex="-1">
+      <div class="modal-dialog">
+        <form class="modal-content" onsubmit="saveTurma(event)">
+          <div class="modal-header">
+            <h5 class="modal-title" id="modalTitle">Nova Turma</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <input type="hidden" id="turmaKey">
+            <div class="mb-3">
+              <label class="form-label">Código Turma</label>
+              <input type="text" class="form-control" id="codigoTurma" required>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Curso</label>
+              <input type="text" class="form-control" id="curso" required>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Trilhas do Futuro</label>
+              <input type="number" class="form-control" id="trilhasDoFuturo" required min="1">
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Turno</label>
+              <select class="form-select" id="turno" required>
+                <option value="manha">Manhã</option>
+                <option value="tarde">Tarde</option>
+                <option value="Noite">Noite</option>
+              </select>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="submit" class="btn btn-success">Salvar</button>
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+          </div>
+        </form>
+      </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+let turmas = null; // Inicialmente vazio
+
+function loadFile(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        try {
+            turmas = JSON.parse(e.target.result);
+            document.getElementById('btnNova').style.display = '';
+            document.getElementById('btnExport').style.display = '';
+            renderTurmas();
+        } catch (err) {
+            alert("Arquivo JSON inválido.");
+        }
+    };
+    reader.readAsText(file, "UTF-8");
+}
+
+function renderTurmas() {
+  if (!turmas) return;
+  let html = `<table class="table table-bordered table-striped align-middle">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Código Turma</th>
+          <th>Curso</th>
+          <th>Trilhas</th>
+          <th>Turno</th>
+          <th>Ações</th>
+        </tr>
+      </thead>
+      <tbody>`;
+  let idx = 1;
+  for (let key in turmas) {
+    let t = turmas[key];
+    html += `<tr>
+      <td>${idx++}</td>
+      <td>${t.codigo_turma}</td>
+      <td>${t.curso}</td>
+      <td>${t.trilhas_do_futuro}</td>
+      <td>${t.turno}</td>
+      <td>
+        <button class="btn btn-warning btn-sm me-1" onclick="editTurma('${key}')">Editar</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteTurma('${key}')">Excluir</button>
+      </td>
+    </tr>`;
+  }
+  html += `</tbody></table>`;
+  document.getElementById("turmasList").innerHTML = html;
+}
+
+let turmaModal = new bootstrap.Modal(document.getElementById('turmaModal'));
+
+function showTurmaForm(editKey = null) {
+  document.getElementById('turmaKey').value = editKey || '';
+  document.getElementById('modalTitle').innerText = editKey ? 'Editar Turma' : 'Nova Turma';
+  if (editKey) {
+    let t = turmas[editKey];
+    document.getElementById('codigoTurma').value = t.codigo_turma;
+    document.getElementById('curso').value = t.curso;
+    document.getElementById('trilhasDoFuturo').value = t.trilhas_do_futuro;
+    document.getElementById('turno').value = t.turno;
+  } else {
+    document.getElementById('codigoTurma').value = '';
+    document.getElementById('curso').value = '';
+    document.getElementById('trilhasDoFuturo').value = 1;
+    document.getElementById('turno').value = 'manha';
+  }
+  turmaModal.show();
+}
+
+function saveTurma(event) {
+  event.preventDefault();
+  const editKey = document.getElementById('turmaKey').value;
+  const obj = {
+    codigo_turma: document.getElementById('codigoTurma').value,
+    curso: document.getElementById('curso').value,
+    trilhas_do_futuro: parseInt(document.getElementById('trilhasDoFuturo').value),
+    unidades_curriculares: editKey ? turmas[editKey].unidades_curriculares : [],
+    turno: document.getElementById('turno').value
+  };
+  if (editKey) {
+    turmas[editKey] = obj;
+  } else {
+    let n = Object.keys(turmas).length + 1;
+    // Garante nome único caso delete
+    let newKey;
+    do { newKey = "turma_" + n++; } while (turmas[newKey]);
+    turmas[newKey] = obj;
+  }
+  turmaModal.hide();
+  renderTurmas();
+}
+
+function editTurma(key) {
+  showTurmaForm(key);
+}
+
+function deleteTurma(key) {
+  if (confirm("Tem certeza que deseja excluir esta turma?")) {
+    delete turmas[key];
+    renderTurmas();
+  }
+}
+
+function exportarJSON() {
+    const blob = new Blob([JSON.stringify(turmas, null, 2)], {type: "application/json"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'turmas_editadas.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+</script>
+</body>
+</html>
