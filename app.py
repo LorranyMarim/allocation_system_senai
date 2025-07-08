@@ -50,39 +50,6 @@ def load_mongo_data():
 
 report_options, classes, classes_options, classes_df, teachers = load_mongo_data()
 
-def get_detected_shifts(classes_selected, classes_df):
-    detected_shifts = []
-    for id_selected in classes_selected:
-        row = classes_df[classes_df["_id"].astype(str) == str(id_selected)]
-        if not row.empty:
-            possible_shift_fields = ["shiftsType", "turnos", "turno"]
-            shiftsType = None
-            for field in possible_shift_fields:
-                if field in row.columns:
-                    shiftsType = row.iloc[0].get(field, None)
-                    if shiftsType:
-                        break
-            if isinstance(shiftsType, list):
-                detected_shifts.extend([t for t in shiftsType if t])
-            elif isinstance(shiftsType, str):
-                if "," in shiftsType:
-                    detected_shifts.extend([s.strip() for s in shiftsType.split(",") if s.strip()])
-                elif shiftsType.strip():
-                    detected_shifts.append(shiftsType.strip())
-    detected_shifts = sorted(set([s.strip().lower() for s in detected_shifts if s and s.lower() != "não informado"]))
-    return detected_shifts
-
-def get_teachers_by_shifts(detected_shifts, teachers):
-    teacher_list = []
-    normalized_shifts = [shift.strip().lower() for shift in detected_shifts]
-    for t in teachers:
-        horario = {k.strip().lower(): v for k, v in t.get("horario_trabalho", {}).items()}
-        for shift in normalized_shifts:
-            val = horario.get(shift, False)
-            if val is True or (isinstance(val, str) and val.strip().lower() == "true"):
-                teacher_list.append(t.get("nome_professor", str(t.get("_id"))))
-    return sorted(set(teacher_list))
-
 def get_turnos(teachers):
     all_turnos = set()
     for t in teachers:
@@ -98,43 +65,31 @@ def prox_dia_util(data, add=1):
             add -= 1
     return data.strftime("%d/%m/%Y")
 
-def buscar_data_inicio(turma):
-    datas_fim = [
-        uc.get("data_fim")
-        for uc in turma["unidades_curriculares"]
-        if uc.get("data_fim")
-    ]
-    if datas_fim:
-        return prox_dia_util(max(datas_fim, key=lambda x: dt.strptime(x, "%d/%m/%Y")))
-    else:
-        return "17/02/2025"
-
-def gerar_alocacao_cronograma(turmas, teachers, filtro_turmas=None, filtro_profs=None, status_uc=None, filtro_turnos=None):
-    # Monta ALTERNANCIA dinamicamente de acordo com os professores e seus horários
+def gerar_alocacao(
+    turmas, teachers, 
+    filtro_turmas=None, filtro_profs=None, status_uc=None, filtro_turnos=None
+):
     ALTERNANCIA = {
         "manha": [t['nome_professor'] for t in teachers if t.get('horario_trabalho', {}).get('manha', False)],
         "tarde": [t['nome_professor'] for t in teachers if t.get('horario_trabalho', {}).get('tarde', False)],
         "noite": [t['nome_professor'] for t in teachers if t.get('horario_trabalho', {}).get('noite', False)]
     }
-
     turmas_filtradas = {tid: t for tid, t in turmas.items() if (not filtro_turmas or tid in filtro_turmas)}
     if filtro_turnos:
         turmas_filtradas = {tid: t for tid, t in turmas_filtradas.items() if t["turno"].lower() in filtro_turnos}
-
     turmas_por_turno = {}
     for turma_id, turma in turmas_filtradas.items():
         turno = turma["turno"]
         if turno not in turmas_por_turno:
             turmas_por_turno[turno] = []
         turmas_por_turno[turno].append((turma_id, turma))
-
     relatorios = {}
     for turno, turmas_do_turno in turmas_por_turno.items():
         ordem_professores = ALTERNANCIA.get(turno, [])
         if not ordem_professores:
-            continue  # Nenhum professor disponível neste turno
+            continue
         ciclo_prof = 0
-        datas_atuais = {turma_id: buscar_data_inicio(turma) for turma_id, turma in turmas_do_turno}
+        datas_atuais = {turma_id: "17/02/2025" for turma_id, turma in turmas_do_turno}
         max_uc = max(
             len([uc for uc in turma["unidades_curriculares"] if (uc.get("status") == "to do" if status_uc == "to do" else True)])
             for _, turma in turmas_do_turno
@@ -158,7 +113,6 @@ def gerar_alocacao_cronograma(turmas, teachers, filtro_turmas=None, filtro_profs
                 for _ in range(dias - 1):
                     data_temp = prox_dia_util(data_temp)
                 data_fim = data_temp
-                # Alocar professor do ciclo
                 if "Fundamentos de Eletroeletrônica Aplicada" in nome_uc:
                     professor = None
                 else:
@@ -181,19 +135,16 @@ def gerar_alocacao_cronograma(turmas, teachers, filtro_turmas=None, filtro_profs
                 })
                 datas_atuais[turma_id] = prox_dia_util(data_fim)
             ciclo_prof = (ciclo_prof + 1) % len(ordem_professores)
-    # Junta tudo em um DataFrame geral
     linhas_geral = []
     for turma_id, rows in relatorios.items():
         for row in rows:
             linhas_geral.append(row)
     df_geral = pd.DataFrame(linhas_geral)
-    # Filtro por professor se existir
     if filtro_profs:
         df_geral = df_geral[df_geral["Professor"].isin(filtro_profs)]
     return df_geral
 
 def main():
-    # Sidebar de filtros
     with st.sidebar:
         st.header("Filtros / Seleções")
         reporting_selected = st.selectbox(
@@ -202,7 +153,6 @@ def main():
             index=0
         )
 
-        # Filtros Cronograma de Turma
         if reporting_selected == "Cronograma de Turma":
             classes_disabled = False
             classes_selected = st.multiselect(
@@ -210,29 +160,9 @@ def main():
                 classes_options,
                 placeholder="Selecione uma ou mais turmas"
             )
-
-            detected_shifts = []
-            shifts_labels = "Nenhum"
-            if len(classes_selected) >= 1:
-                detected_shifts = get_detected_shifts(classes_selected, classes_df)
-                if detected_shifts:
-                    shifts_labels = ", ".join([s.capitalize() for s in detected_shifts])
-            st.markdown(
-                f'<div class="turnos-label">Turnos Detectados: <b>{shifts_labels}</b></div>',
-                unsafe_allow_html=True
-            )
-
             teacher_list = []
             teacher_name = []
             teachers_disabled = not (len(classes_selected) >= 1)
-            if len(classes_selected) >= 1:
-                teacher_list = get_teachers_by_shifts(detected_shifts, teachers) if detected_shifts else []
-            teacher_name = st.multiselect(
-                "Professores dos turnos selecionados:",
-                teacher_list if teacher_list else ["Nenhum professor disponível para o(s) turno(s) selecionado(s)"],
-                disabled=teachers_disabled
-            )
-
             option_type_uc = {0: "Todas", 1: "Concluídas", 2: "Pendentes"}
             selection = st.segmented_control(
                 label="Tipo de Unidade Curricular",
@@ -244,8 +174,6 @@ def main():
             )
             generate_disabled = not (len(classes_selected) >= 1)
             generate_report = st.button("Gerar Relatório", disabled=generate_disabled)
-
-        # Filtros Alocação de Professores
         elif reporting_selected == "Alocação de Professores":
             all_turnos = get_turnos(teachers)
             selected_turnos = st.multiselect(
@@ -259,25 +187,71 @@ def main():
                 teacher_names_all,
                 placeholder="Selecione um ou mais professores"
             )
-            selection = None  # Não há status
-            classes_selected = None  # Não há filtro por turma aqui
+            selection = None
+            classes_selected = None
             generate_report = st.button("Gerar Relatório")
 
     st.title("Relatórios")
-
-    # ------- DADOS MONGO ---------
     db = get_mongo_db()
     turmas_cursor = db.classes_with_courses.find()
     turmas = {str(t['_id']): t for t in turmas_cursor}
 
-    # ---------- RELATÓRIO ----------
+    # BLOCO DE "ALOCACAO DE PROFESSORES"
+    if reporting_selected == "Alocação de Professores" and 'generate_report' in locals() and generate_report:
+        df_relatorio = gerar_alocacao(
+            turmas=turmas,
+            teachers=teachers,
+            filtro_profs=teacher_name if teacher_name else None,
+            filtro_turnos=selected_turnos if selected_turnos else None
+        )
+
+        if not df_relatorio.empty:
+            st.subheader("Indicadores Gerais")
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total de UCs", len(df_relatorio))
+            col2.metric("UCs sem professor", df_relatorio['Professor'].str.contains("PRECISA DE OUTRO PROFISSIONAL").sum())
+            col3.metric("Total de Professores", df_relatorio['Professor'].nunique())
+
+            st.subheader("Distribuição de UCs por Professor")
+            df_pie = df_relatorio["Professor"].value_counts().reset_index()
+            df_pie.columns = ["Professor", "Qtd_UC"]
+            fig_pie = px.pie(df_pie, names="Professor", values="Qtd_UC", title="UCs por Professor")
+            fig_pie.update_traces(textinfo="value+label")
+            st.plotly_chart(fig_pie, use_container_width=True)
+
+            st.subheader("Carga de Dias por Professor")
+            df_bar = df_relatorio.groupby("Professor")["Qtd Dias"].sum().reset_index()
+            fig_bar = px.bar(df_bar, x="Professor", y="Qtd Dias", title="Total de Dias por Professor")
+            fig_bar.update_layout(yaxis_title="Dias")
+            st.plotly_chart(fig_bar, use_container_width=True)
+
+            st.subheader("Professores no Limite de Alocação")
+            limite_dias = 100  # Ajuste conforme realidade da carga horária máxima
+            df_limite = df_bar[df_bar["Qtd Dias"] >= limite_dias]
+            if not df_limite.empty:
+                st.dataframe(df_limite, use_container_width=True)
+            else:
+                st.success(f"Nenhum professor acima do limite configurado ({limite_dias} dias)")
+
+            st.subheader("Tabela Detalhada")
+            st.dataframe(df_relatorio, use_container_width=True)
+
+            csv = df_relatorio.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="Baixar relatório em CSV",
+                data=csv,
+                file_name='relatorio_professores.csv',
+                mime='text/csv',
+            )
+        else:
+            st.info("Nenhuma alocação encontrada com os filtros selecionados.")
+
+    # BLOCO DE "CRONOGRAMA DE TURMA"
     if reporting_selected == "Cronograma de Turma" and 'generate_report' in locals() and generate_report:
-        # Status UC
         status_map = {0: None, 1: "done", 2: "to do"}
         status_uc = status_map.get(selection)
 
-        # Aplica filtros de turma, professor, status
-        df_relatorio = gerar_alocacao_cronograma(
+        df_relatorio = gerar_alocacao(
             turmas=turmas,
             teachers=teachers,
             filtro_turmas=classes_selected,
@@ -285,90 +259,48 @@ def main():
             status_uc=status_uc
         )
 
-        # Layout superior (Tabela + Gráfico Pizza)
-        upper, lower = st.container(), st.container()
-        with upper:
-            col1, col2 = st.columns([3, 2], gap="large")
-            with col1:
-                st.subheader("Resultado da Alocação")
-                if not df_relatorio.empty:
-                    st.dataframe(
-                        df_relatorio[["Turma", "UC", "Data de Início", "Data de Fim", "Professor"]],
-                        hide_index=True,
-                        use_container_width=True
-                    )
-                else:
-                    st.info("Nenhuma UC encontrada para os filtros aplicados.")
-            with col2:
-                st.subheader("Proporção de UCs por Professor (Gráfico Pizza)")
-                if not df_relatorio.empty:
-                    df_pie = df_relatorio["Professor"].value_counts().reset_index()
-                    df_pie.columns = ["Professor", "Qtd_UC"]
-                    fig_pie = px.pie(df_pie, names="Professor", values="Qtd_UC", title="UCs por Professor")
-                    fig_pie.update_traces(textinfo="value+label")
-                    st.plotly_chart(fig_pie, use_container_width=True)
-                else:
-                    fig_pie = px.pie(values=[], names=[], title="UCs por Professor")
-                    fig_pie.update_traces(textinfo='none')
-                    st.plotly_chart(fig_pie, use_container_width=True)
+        if not df_relatorio.empty:
+            st.subheader("Indicadores")
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total de UCs", len(df_relatorio))
+            col2.metric("UCs sem professor", df_relatorio['Professor'].str.contains("PRECISA DE OUTRO PROFISSIONAL").sum())
+            col3.metric("Total de Professores", df_relatorio['Professor'].nunique())
 
-        # Layout inferior (Gráfico de Barras)
-        with lower:
-            st.subheader("Tempo total de alocação por Professor (Gráfico Barras)")
-            if not df_relatorio.empty:
-                df_bar = df_relatorio.groupby("Professor")["Qtd Dias"].sum().reset_index()
-                fig_bar = px.bar(df_bar, x="Professor", y="Qtd Dias", title="Total de Dias por Professor")
-                fig_bar.update_layout(yaxis_title="Total de Dias")
-                st.plotly_chart(fig_bar, use_container_width=True)
-            else:
-                fig_bar = px.bar(x=[], y=[], title="Total de Dias por Professor")
-                st.plotly_chart(fig_bar, use_container_width=True)
+            st.subheader("Linha do Tempo (Cronograma Visual)")
+            df_gantt = df_relatorio.copy()
+            df_gantt['Data de Início'] = pd.to_datetime(df_gantt['Data de Início'], dayfirst=True)
+            df_gantt['Data de Fim'] = pd.to_datetime(df_gantt['Data de Fim'], dayfirst=True)
+            df_gantt['Turma - UC'] = df_gantt['Turma'] + " - " + df_gantt['UC'].astype(str)
+            fig = px.timeline(
+                df_gantt,
+                x_start="Data de Início",
+                x_end="Data de Fim",
+                y="Turma - UC",
+                color="Professor",
+                text="Status",
+                title="Cronograma de Turmas"
+            )
+            fig.update_yaxes(autorange="reversed")
+            fig.update_layout(xaxis_title="Data", yaxis_title="Turma - UC", legend_title="Professor")
+            st.plotly_chart(fig, use_container_width=True)
 
-    elif reporting_selected == "Alocação de Professores" and 'generate_report' in locals() and generate_report:
-        df_relatorio = gerar_alocacao_cronograma(
-            turmas=turmas,
-            teachers=teachers,
-            filtro_profs=teacher_name if teacher_name else None,
-            filtro_turnos=selected_turnos if selected_turnos else None
-        )
+            st.subheader("Tabela Detalhada do Cronograma")
+            st.dataframe(df_relatorio, use_container_width=True)
 
-        upper, lower = st.container(), st.container()
-        with upper:
-            col1, col2 = st.columns([3, 2], gap="large")
-            with col1:
-                st.subheader("UCs Alocadas (por Professor)")
-                if not df_relatorio.empty:
-                    st.dataframe(
-                        df_relatorio[["Turma", "Turno", "UC", "Data de Início", "Data de Fim", "Professor"]],
-                        hide_index=True,
-                        use_container_width=True
-                    )
-                else:
-                    st.info("Nenhum dado encontrado para o filtro.")
-            with col2:
-                st.subheader("Distribuição de UCs por Professor (Pizza)")
-                if not df_relatorio.empty:
-                    df_pie = df_relatorio["Professor"].value_counts().reset_index()
-                    df_pie.columns = ["Professor", "Qtd_UC"]
-                    fig_pie = px.pie(df_pie, names="Professor", values="Qtd_UC", title="UCs por Professor")
-                    fig_pie.update_traces(textinfo="value+label")
-                    st.plotly_chart(fig_pie, use_container_width=True)
-                else:
-                    fig_pie = px.pie(values=[], names=[], title="UCs por Professor")
-                    fig_pie.update_traces(textinfo='none')
-                    st.plotly_chart(fig_pie, use_container_width=True)
+            csv = df_relatorio.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="Baixar tabela em CSV",
+                data=csv,
+                file_name='cronograma_turma.csv',
+                mime='text/csv',
+            )
+        else:
+            st.info("Nenhuma UC encontrada para os filtros aplicados.")
 
-        with lower:
-            st.subheader("Total de Dias de Alocação (por Professor) - Barras")
-            if not df_relatorio.empty:
-                df_bar = df_relatorio.groupby("Professor")["Qtd Dias"].sum().reset_index()
-                fig_bar = px.bar(df_bar, x="Professor", y="Qtd Dias", title="Total de Dias por Professor")
-                fig_bar.update_layout(yaxis_title="Total de Dias")
-                st.plotly_chart(fig_bar, use_container_width=True)
-            else:
-                fig_bar = px.bar(x=[], y=[], title="Total de Dias por Professor")
-                st.plotly_chart(fig_bar, use_container_width=True)
-    else:
+    if not (
+        (reporting_selected == "Alocação de Professores" and 'generate_report' in locals() and generate_report) or
+        (reporting_selected == "Cronograma de Turma" and 'generate_report' in locals() and generate_report)
+    ):
         st.info("Selecione os filtros e clique em Gerar Relatório para visualizar os dados.")
 
 if __name__ == '__main__':
