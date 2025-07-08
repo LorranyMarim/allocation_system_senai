@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime as dt
 import pandas as pd
 from conexao_mongo import get_mongo_db
 
@@ -6,116 +6,160 @@ from conexao_mongo import get_mongo_db
 db = get_mongo_db()
 turmas_cursor = db.classes_with_courses.find()
 turmas = {str(t['_id']): t for t in turmas_cursor}
-
 teachers = list(db.teachers_with_courses.find())
-# Monta ALTERNANCIA dinamicamente de acordo com os professores e seus horários
-ALTERNANCIA = {
-    "manha": [t['nome_professor'] for t in teachers if t.get('horario_trabalho', {}).get('manha', False)],
-    "tarde": [t['nome_professor'] for t in teachers if t.get('horario_trabalho', {}).get('tarde', False)],
-    "noite": [t['nome_professor'] for t in teachers if t.get('horario_trabalho', {}).get('noite', False)]
+
+# 2. Montar alternância fixa de professores por turno, em ordem crescente de _id
+def ordenar_professores(teachers, turno):
+    profs_turno = [t for t in teachers 
+                   if t.get('horario_trabalho', {}).get(turno, False) 
+                   and str(t.get('_id', '')).startswith('Prof_')]
+    # Ordena pelo número incremental do _id (ex: Prof_1, Prof_2, ...)
+    profs_turno.sort(key=lambda t: int(str(t['_id']).replace('Prof_', '')))
+    return [t['nome_professor'] for t in profs_turno]
+
+FILA = {
+    turno: ordenar_professores(teachers, turno)
+    for turno in ['manha', 'tarde', 'noite']
 }
 
-# 2. Função utilitária para avançar para o próximo dia útil (segunda a sexta)
-def prox_dia_util(data, add=1):
-    data = datetime.strptime(data, "%d/%m/%Y")
-    while add > 0:
-        data += timedelta(days=1)
-        if data.weekday() < 5:
-            add -= 1
-    return data.strftime("%d/%m/%Y")
+# 3. Função para ordenar UCs "to do" com datas já informadas
+def ordenar_ucs_to_do(turmas):
+    ucs = []
+    for turma_id, turma in turmas.items():
+        for uc in turma.get("unidades_curriculares", []):
+            if uc.get("status") == "to do":
+                ucs.append({
+                    "turma_id": turma_id,
+                    "Turma": turma.get("codigo_turma"),
+                    "Turno": turma.get("turno").lower(),
+                    "UC": uc.get("nome"),
+                    "data_inicio": uc.get("data_inicio"),
+                    "data_fim": uc.get("data_fim"),
+                })
+    return sorted(ucs, key=lambda x: dt.strptime(x["data_inicio"], "%d/%m/%Y"))
 
-# 3. Descobrir a maior data_fim "done" de cada turma (ponto de partida do cronograma)
-def buscar_data_inicio(turma):
-    datas_fim = [
-        uc.get("data_fim")
-        for uc in turma["unidades_curriculares"]
-        if uc.get("data_fim")
-    ]
-    if datas_fim:
-        return prox_dia_util(max(datas_fim, key=lambda x: datetime.strptime(x, "%d/%m/%Y")))
-    else:
-        return "17/02/2025"
+# 4. Função para verificar sobreposição de datas
+def overlap(start1, end1, start2, end2):
+    return not (end1 < start2 or start1 > end2)
 
-# 4. Preparar o cronograma das UCs por turno
-turmas_por_turno = {}
-for turma_id, turma in turmas.items():
-    turno = turma["turno"]
-    if turno not in turmas_por_turno:
-        turmas_por_turno[turno] = []
-    turmas_por_turno[turno].append((turma_id, turma))
+# 5. Geração da alocação híbrida
+def gerar_alocacao_hibrida(turmas, teachers):
+    ucs = ordenar_ucs_to_do(turmas)
+    ocupacoes = {t["nome_professor"]: [] for t in teachers}
+    ponteiro = {turno: 0 for turno in FILA}  # Fixa a ordem dos professores
 
-# 5. Rodar o ciclo de alocação para cada turno
-relatorios = {}
-for turno, turmas_do_turno in turmas_por_turno.items():
-    ordem_professores = ALTERNANCIA.get(turno, [])
-    if not ordem_professores:
-        continue  # Nenhum professor disponível neste turno
-    ciclo_prof = 0
-    datas_atuais = {turma_id: buscar_data_inicio(turma) for turma_id, turma in turmas_do_turno}
-    max_uc = max(
-        len([uc for uc in turma["unidades_curriculares"] if uc.get("status") == "to do"])
-        for _, turma in turmas_do_turno
-    )
-    for etapa in range(max_uc):
-        for turma_id, turma in turmas_do_turno:
-            uc_list = [
-                uc for uc in sorted(turma["unidades_curriculares"], key=lambda x: x.get("ordem", 0))
-                if uc.get("status") == "to do"
-            ]
-            if etapa >= len(uc_list):
-                continue
-            uc = uc_list[etapa]
-            nome_uc = uc.get("nome")
-            if not nome_uc:
-                nome_uc = [v for k, v in uc.items() if k.startswith("uc_")]
-                nome_uc = nome_uc[0] if nome_uc else "UC não informada"
-            dias = uc.get("qtd_dias", 0)
-            data_inicio = datas_atuais[turma_id]
-            data_temp = data_inicio
-            for _ in range(dias - 1):
-                data_temp = prox_dia_util(data_temp)
-            data_fim = data_temp
-            # Alocar professor do ciclo
-            if "Fundamentos de Eletroeletrônica Aplicada" in nome_uc:
-                professor = None
-            else:
-                if ciclo_prof < len(ordem_professores):
-                    professor = ordem_professores[ciclo_prof]
-                else:
-                    professor = None
-            aviso = "PRECISA DE OUTRO PROFISSIONAL" if professor is None else ""
-            if turma_id not in relatorios:
-                relatorios[turma_id] = []
-            relatorios[turma_id].append({
-                "UC": nome_uc,
-                "Data de Início": data_inicio,
-                "Data de Fim": data_fim,
-                "Professor": professor if professor else aviso
-            })
-            datas_atuais[turma_id] = prox_dia_util(data_fim)
-        ciclo_prof = (ciclo_prof + 1) % len(ordem_professores)
-
-# 6. Geração dos relatórios XLSX
-for turma_id, rows in relatorios.items():
-    turma_nome = turmas[turma_id]["codigo_turma"]
-    df = pd.DataFrame(rows)
-    nome_arquivo = f"relatorio_{turma_nome}.xlsx"
-    df.to_excel(nome_arquivo, index=False)
-    print(f"Relatório salvo: {nome_arquivo}")
-
-# 7. Relatório geral dos professores (tudo agrupado)
-linhas_geral = []
-for turma_id, rows in relatorios.items():
-    turma_nome = turmas[turma_id]["codigo_turma"]
-    for row in rows:
-        linhas_geral.append({
-            "Turma": turma_nome,
-            "UC": row["UC"],
-            "Data de Início": row["Data de Início"],
-            "Data de Fim": row["Data de Fim"],
-            "Professor": row["Professor"]
+    alocacoes = []
+    for entry in ucs:
+        turno = entry["Turno"]
+        profs = FILA.get(turno, [])
+        escolhido = None
+        start = dt.strptime(entry["data_inicio"], "%d/%m/%Y")
+        end = dt.strptime(entry["data_fim"], "%d/%m/%Y")
+        if not profs:
+            escolhido = "SEM PROFESSOR DISPONÍVEL"
+        else:
+            for i in range(len(profs)):
+                idx = (ponteiro[turno] + i) % len(profs)
+                prof = profs[idx]
+                conflitos = any(overlap(start, end, os_start, os_end)
+                                for os_start, os_end in ocupacoes[prof])
+                if not conflitos:
+                    escolhido = prof
+                    ocupacoes[prof].append((start, end))
+                    ponteiro[turno] = (idx + 1) % len(profs)  # avança ponteiro da alternância
+                    break
+            if not escolhido:
+                escolhido = "SEM PROFESSOR DISPONÍVEL"
+        alocacoes.append({
+            "Turma": entry["Turma"],
+            "UC": entry["UC"],
+            "Data de Início": entry["data_inicio"],
+            "Data de Fim": entry["data_fim"],
+            "Professor": escolhido
         })
-df_geral = pd.DataFrame(linhas_geral)
-df_geral = df_geral.sort_values(["Professor", "Turma", "Data de Início"])
-df_geral.to_excel("relatorio_geral_professores.xlsx", index=False)
-print("Relatório geral de professores salvo: relatorio_geral_professores.xlsx")
+    return pd.DataFrame(alocacoes)
+
+# 6. Gera relatório
+df_alocacao = gerar_alocacao_hibrida(turmas, teachers)
+df_alocacao.to_excel("relatorio_alocacao_hibrido.xlsx", index=False)
+print("Relatório salvo: relatorio_alocacao_hibrido.xlsx")
+def gerar_alocacao_hibrida_streamlit(turmas, teachers, filtro_turmas=None, filtro_profs=None, status_uc=None, filtro_turnos=None):
+    # 1. Filtra turmas conforme necessário
+    turmas_filtradas = {tid: t for tid, t in turmas.items() if (not filtro_turmas or tid in filtro_turmas)}
+    if filtro_turnos:
+        turmas_filtradas = {tid: t for tid, t in turmas_filtradas.items() if t["turno"].lower() in filtro_turnos}
+
+    # 2. Monta alternância fixa de professores por turno, usando _id Prof_*
+    def ordenar_professores(teachers, turno):
+        profs_turno = [t for t in teachers 
+                       if t.get('horario_trabalho', {}).get(turno, False) 
+                       and str(t.get('_id', '')).startswith('Prof_')]
+        profs_turno.sort(key=lambda t: int(str(t['_id']).replace('Prof_', '')))
+        return [t['nome_professor'] for t in profs_turno]
+    FILA = {
+        turno: ordenar_professores(teachers, turno)
+        for turno in ['manha', 'tarde', 'noite']
+    }
+
+    # 3. Ordena UCs "to do" (ou todas) por data de início informada
+    ucs = []
+    for turma_id, turma in turmas_filtradas.items():
+        for uc in turma.get("unidades_curriculares", []):
+            if ((status_uc is None and uc.get("status") in ["to do", "done"]) or
+                (status_uc is not None and uc.get("status") == status_uc)):
+                ucs.append({
+                    "turma_id": turma_id,
+                    "Turma": turma.get("codigo_turma"),
+                    "Turno": turma.get("turno").lower(),
+                    "UC": uc.get("nome"),
+                    "Status": uc.get("status"),
+                    "Qtd Dias": uc.get("qtd_dias"),
+                    "data_inicio": uc.get("data_inicio"),
+                    "data_fim": uc.get("data_fim"),
+                })
+    ucs = sorted(ucs, key=lambda x: dt.strptime(x["data_inicio"], "%d/%m/%Y"))
+
+    # 4. Alocação considerando alternância fixa e sem sobreposição
+    def overlap(start1, end1, start2, end2):
+        return not (end1 < start2 or start1 > end2)
+    ocupacoes = {t["nome_professor"]: [] for t in teachers}
+    ponteiro = {turno: 0 for turno in FILA}
+
+    alocacoes = []
+    for entry in ucs:
+        turno = entry["Turno"]
+        profs = FILA.get(turno, [])
+        escolhido = None
+        start = dt.strptime(entry["data_inicio"], "%d/%m/%Y")
+        end = dt.strptime(entry["data_fim"], "%d/%m/%Y")
+        if not profs:
+            escolhido = "SEM PROFESSOR DISPONÍVEL"
+        else:
+            for i in range(len(profs)):
+                idx = (ponteiro[turno] + i) % len(profs)
+                prof = profs[idx]
+                conflitos = any(overlap(start, end, os_start, os_end)
+                                for os_start, os_end in ocupacoes[prof])
+                if not conflitos:
+                    escolhido = prof
+                    ocupacoes[prof].append((start, end))
+                    ponteiro[turno] = (idx + 1) % len(profs)
+                    break
+            if not escolhido:
+                escolhido = "SEM PROFESSOR DISPONÍVEL"
+        alocacoes.append({
+            "Turma": entry["Turma"],
+            "Turno": turno,
+            "UC": entry["UC"],
+            "Status": entry["Status"],
+            "Data de Início": entry["data_inicio"],
+            "Data de Fim": entry["data_fim"],
+            "Professor": escolhido,
+            "Qtd Dias": entry["Qtd Dias"]
+        })
+
+    df_geral = pd.DataFrame(alocacoes)
+    # Filtro final por professor, se houver
+    if filtro_profs:
+        df_geral = df_geral[df_geral["Professor"].isin(filtro_profs)]
+    return df_geral
